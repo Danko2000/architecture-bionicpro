@@ -1,0 +1,155 @@
+x-airflow-common: &airflow-common
+  build: .
+  # env_file: .env  <-- ЭТУ СТРОКУ НУЖНО БЫЛО УДАЛИТЬ, ИЗ-ЗА НЕЕ ОШИБКА
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres_business:5432/airflow
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres_business:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres_business:
+      condition: service_healthy
+  networks:
+    - bionic_net
+
+services:
+  # --- 1. IAM (Keycloak) ---
+  keycloak_db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: keycloak_db
+      POSTGRES_USER: keycloak_user
+      POSTGRES_PASSWORD: keycloak_password
+    volumes:
+      - keycloak_data:/var/lib/postgresql/data
+    networks:
+      - bionic_net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:21.1
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
+      KC_DB_USERNAME: keycloak_user
+      KC_DB_PASSWORD: keycloak_password
+    command: 
+      - start-dev
+    ports:
+      - "8080:8080"
+    depends_on:
+      - keycloak_db
+    networks:
+      - bionic_net
+
+  # --- 2. БИЗНЕС ДАННЫЕ (Postgres + ClickHouse) ---
+  postgres_business:
+    image: postgres:16.0
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - ./db/init-postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+    networks:
+      - bionic_net
+    ports:
+      - "5432:5432"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      - CLICKHOUSE_USER=airflow_user
+      - CLICKHOUSE_PASSWORD=airflow_pass
+      - CLICKHOUSE_DB=default
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - ch_data:/var/lib/clickhouse
+      - ./db/init-clickhouse.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - bionic_net
+
+  # --- 3. BACKEND API (Python) ---
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      clickhouse:
+        condition: service_started
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: airflow_user
+      CLICKHOUSE_PASSWORD: airflow_pass
+      ALLOW_ORIGINS: "http://localhost:3000"
+    networks:
+      - bionic_net
+
+  # --- 4. FRONTEND (React) ---
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+      REACT_APP_KEYCLOAK_URL: http://localhost:8080
+      REACT_APP_KEYCLOAK_REALM: reports-realm
+      REACT_APP_KEYCLOAK_CLIENT_ID: reports-frontend
+    depends_on:
+      - backend
+      - keycloak
+    networks:
+      - bionic_net
+
+  # --- 5. AIRFLOW ---
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    command: >
+      bash -c "airflow db migrate && 
+      airflow users create --username admin --firstname admin --lastname admin --role Admin --email admin@example.com --password admin || true"
+
+volumes:
+  ch_data:
+  keycloak_data:
+
+networks:
+  bionic_net:
+    driver: bridge
