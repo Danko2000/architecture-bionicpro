@@ -1,7 +1,7 @@
 # backend/main.py
 
 from fastapi import FastAPI, Depends, HTTPException
-from fastapi.middleware.cors import CORSMiddleware  # ВАЖНО для связи с фронтендом
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from clickhouse_driver import Client
 from jose import jwt, JWTError
@@ -10,7 +10,7 @@ import os
 
 app = FastAPI()
 
-# --- Настройка CORS (чтобы React с порта 3000 мог стучаться на порт 8000) ---
+# --- Настройка CORS ---
 origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -45,16 +45,10 @@ class ReportResponse(BaseModel):
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     """
-    Извлекает пользователя из токена. 
-    Гарантирует, что пользователь может запросить данные только про себя.
+    Извлекает пользователя из токена.
     """
     try:
-        # В продакшене здесь нужно валидировать подпись токена ключом Keycloak!
-        # options={"verify_signature": False} используем только для примера, 
-        # если нет прямого доступа к сертификатам Keycloak в backend контейнере.
         payload = jwt.get_unverified_claims(token)
-        
-        # Keycloak обычно кладет логин в 'preferred_username' или 'name'
         username = payload.get("preferred_username") or payload.get("name")
         
         if username is None:
@@ -67,29 +61,26 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 def get_my_report(current_user: str = Depends(get_current_user)):
     print(f"Запрос отчета для пользователя: {current_user}")
     
-    # Запрос к ClickHouse
-    # LIMIT 1 BY report_date DESC гарантирует, что мы берем самые свежие данные,
-    # которые успел обработать Airflow.
-   query = """
+    
+    query = """
         SELECT 
             client_name, 
             prosthesis_model, 
             total_usage_hours, 
-            avg_response_time_ms
+            avg_response_time_ms,
+            report_date
         FROM report_data_mart 
         WHERE lower(client_name) = lower(%(username)s)
         ORDER BY report_date DESC
         LIMIT 1
     """
     
-    # Безопасное выполнение с параметрами (защита от инъекций)
     try:
         result = client.execute(query, {"username": current_user})
     except Exception as e:
         print(f"ClickHouse Error: {e}")
         raise HTTPException(status_code=500, detail="Ошибка подключения к аналитической базе")
 
-    # Если Airflow еще не положил данные для этого пользователя
     if not result:
         raise HTTPException(
             status_code=404, 
@@ -98,11 +89,17 @@ def get_my_report(current_user: str = Depends(get_current_user)):
     
     row = result[0]
     
+    # Сопоставление колонок из SELECT:
+    # row[0] -> client_name
+    # row[1] -> prosthesis_model
+    # row[2] -> total_usage_hours
+    # row[3] -> avg_response_time_ms
+    # row[4] -> report_date
     return {
         "client_name": row[0],
         "prosthesis_model": row[1],
         "total_usage_hours": float(row[2]),
         "avg_response_time_ms": float(row[3]),
-        "report_date": row[4],
+        "report_date": str(row[4]),
         "status": "Норма" if float(row[3]) < 200 else "Требует калибровки"
     }
