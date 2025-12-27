@@ -1,6 +1,5 @@
 x-airflow-common: &airflow-common
   build: .
-  # env_file: .env  <-- ЭТУ СТРОКУ НУЖНО БЫЛО УДАЛИТЬ, ИЗ-ЗА НЕЕ ОШИБКА
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -9,6 +8,10 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__FERNET_KEY: ''
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    # Соединение для CRM данных
+    AIRFLOW_CONN_CRM_DB_CONN: postgresql://airflow:airflow@postgres_business:5432/airflow
+    # НОВОЕ: Соединение для данных телеметрии (исправляет текущую ошибку)
+    AIRFLOW_CONN_TELEMETRY_DB_CONN: postgresql://airflow:airflow@postgres_business:5432/airflow
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
@@ -32,6 +35,11 @@ services:
       - keycloak_data:/var/lib/postgresql/data
     networks:
       - bionic_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak_user -d keycloak_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   keycloak:
     image: quay.io/keycloak/keycloak:21.1
@@ -42,12 +50,17 @@ services:
       KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
       KC_DB_USERNAME: keycloak_user
       KC_DB_PASSWORD: keycloak_password
+      KC_IMPORT: /opt/keycloak/data/import/realm-export.json
     command: 
       - start-dev
+      - --import-realm
     ports:
       - "8080:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
     depends_on:
-      - keycloak_db
+      keycloak_db:
+        condition: service_healthy
     networks:
       - bionic_net
 
