@@ -1,0 +1,5 @@
+psycopg2-binary
+apache-airflow-providers-postgres
+clickhouse-driver
+airflow-clickhouse-plugin
+clickhouse-driver[lz4]
